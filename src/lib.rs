@@ -1,50 +1,33 @@
 //! Provides a low-level interface to IDA Pro via IDC and IDAPython
 //! scripts represented as strings.
 
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate failure_derive;
-#[macro_use]
-extern crate serde_derive;
+use lazy_static::lazy_static;
 
 use std::fs;
-use std::fs::File;
 use std::io::Write;
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::process;
 
 use regex::Regex;
+use snafu::Snafu;
 
-use failure::Error;
-
-#[derive(Debug, Fail)]
+#[derive(Debug, Snafu)]
 pub enum IdaError {
-    #[fail(display = "invalid path to IDA executable: {}", path)]
+    #[snafu(display("invalid path to IDA executable: {}", path))]
     InvalidPath { path: String },
-    #[fail(display = "invalid analysis target: {:?}", path)]
+    #[snafu(display("invalid analysis target: {:?}", path))]
     InvalidTarget { path: PathBuf },
-    #[fail(display = "invalid analysis target {:?}; would clobber {:?}", path, clobber)]
+    #[snafu(display("invalid analysis target {:?}; would clobber {:?}", path, clobber))]
     InvalidTargetClobber { path: PathBuf, clobber: PathBuf },
+    #[snafu(display("canonicalisation of path failed"))] 
+    BadCanonicalisation { source: std::io::Error }
 }
 
-// Exported basic block information
-#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
-pub struct Block {
-    pub start_addr: u64,
-    pub end_addr: u64,
-    pub t_reg: Option<bool>,
-    pub dests: Vec<u64>,
-}
-
-// Exported function information
-#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
-pub struct Function {
-    pub name: String,
-    pub start_addr: u64,
-    pub end_addr: u64,
-    pub blocks: Vec<Block>,
+impl From <std::io::Error> for IdaError {
+    fn from(error : std::io::Error) -> Self {
+        IdaError::BadCanonicalisation{ source: error }
+    }
 }
 
 /// IDA analysis capability.
@@ -66,22 +49,6 @@ pub enum Mode {
 pub enum Type {
     IDC,
     Python,
-}
-
-/// An IDA context for interfacing with IDA Pro.
-#[derive(Debug, PartialEq)]
-pub struct IDA {
-    exec: String,
-    bits: Bits,
-    mode: Mode,
-    wine: bool,
-    docker_image: Option<String>,
-    docker_tag: Option<String>,
-    docker_local_dir: Option<PathBuf>,
-    docker_mount_dir: Option<String>,
-    docker_clobber: bool,
-    remove_database: bool,
-    script_type: Type,
 }
 
 lazy_static! {
@@ -111,6 +78,22 @@ fn windowsify<S: AsRef<str>>(path: S) -> String {
     }
 }
 
+/// An IDA context for interfacing with IDA Pro.
+#[derive(Debug, PartialEq)]
+pub struct IDA {
+    exec: String,
+    bits: Bits,
+    mode: Mode,
+    wine: bool,
+    docker_image: Option<String>,
+    docker_tag: Option<String>,
+    docker_local_dir: Option<PathBuf>,
+    docker_mount_dir: Option<String>,
+    docker_clobber: bool,
+    remove_database: bool,
+    script_type: Type,
+}
+
 /// IDA implements the core functionality of rida it provides a context with
 /// known capabilities upon creation.
 impl IDA {
@@ -122,7 +105,7 @@ impl IDA {
     /// the given IDA executable. For instance: `idal64` will run headless in
     /// 64-bit mode, whereas `idaq` will run with a graphical interface in
     /// 32-bit mode.
-    pub fn new(ida_path: &str) -> Result<IDA, Error> {
+    pub fn new(ida_path: &str) -> Result<Self, IdaError> {
         CAPABILITIES
             .captures(ida_path)
             .map(|caps| IDA {
@@ -147,10 +130,9 @@ impl IDA {
                 script_type: Type::Python,
             })
             .ok_or(
-                IdaError::InvalidPath {
+               IdaError::InvalidPath {
                     path: ida_path.to_owned(),
                 }
-                .into(),
             )
     }
 
@@ -160,7 +142,7 @@ impl IDA {
         local: R,
         mount: &str,
         ida_path: &str,
-    ) -> Result<IDA, Error> {
+    ) -> Result<IDA, IdaError> {
         Self::new(ida_path).and_then(|i| i.with_docker(image, tag, local, mount))
     }
 
@@ -176,10 +158,11 @@ impl IDA {
         tag: &str,
         local: R,
         mount: &str,
-    ) -> Result<IDA, Error> {
+    ) -> Result<IDA, IdaError> {
+        let local = local.as_ref();
         self.docker_image = Some(image.to_owned());
         self.docker_tag = Some(tag.to_owned());
-        self.docker_local_dir = Some(local.as_ref().canonicalize()?);
+        self.docker_local_dir = Some(local.canonicalize()?);
         self.docker_mount_dir = Some(mount.to_owned());
         Ok(self)
     }
@@ -221,7 +204,7 @@ impl IDA {
 
     /// Runs the script with the contents given as `script` on the `target`
     /// executable.
-    pub fn run<T: AsRef<Path>>(&self, script: &str, target: T) -> Result<bool, Error> {
+    pub fn run<T: AsRef<Path>>(&self, script: &str, target: T) -> Result<bool, IdaError> {
         let target = target.as_ref().canonicalize()?;
         let mut copied_target = false;
         let mut orig_path = None;
@@ -348,38 +331,5 @@ impl IDA {
         }
 
         Ok(output.status.success())
-    }
-
-    pub fn function_names<T: AsRef<Path>>(&self, target: T) -> Result<Vec<String>, Error> {
-        let json = tempfile::Builder::new().suffix("json").tempfile()?;
-        let path = json.into_temp_path();
-        let command = format!(include_str!("../python/function_names.py"), path.display());
-
-        self.run(&command, target)?;
-
-        let json = File::open(&path)?;
-        serde_json::from_reader::<_, Vec<String>>(&json).map_err(Error::from)
-    }
-
-    pub fn function_boundaries<T: AsRef<Path>>(&self, target: T) -> Result<Vec<(u64, u64)>, Error> {
-        let json = tempfile::Builder::new().suffix("json").tempfile()?;
-        let path = json.into_temp_path();
-        let command = format!(include_str!("../python/function_starts.py"), path.display());
-
-        self.run(&command, target)?;
-
-        let json = File::open(&path)?;
-        serde_json::from_reader::<_, Vec<(u64, u64)>>(&json).map_err(Error::from)
-    }
-
-    pub fn function_cfgs<T: AsRef<Path>>(&self, target: T) -> Result<Vec<Function>, Error> {
-        let json = tempfile::Builder::new().suffix("json").tempfile()?;
-        let path = json.into_temp_path();
-        let command = format!(include_str!("../python/function_cfgs.py"), path.display());
-
-        self.run(&command, target)?;
-
-        let json = File::open(&path)?;
-        serde_json::from_reader::<_, Vec<Function>>(&json).map_err(Error::from)
     }
 }
