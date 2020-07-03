@@ -87,27 +87,6 @@ pub fn windowsify<S: AsRef<str>>(path: S, double_escape: bool) -> String {
     }
 }
 
-
-pub fn wine_windowsify<S: AsRef<str>>(path: S) -> String {
-    let path = path.as_ref();
-    if WINDOWS_PATH.is_match(path.as_ref()) {
-        path.replace(r"\", r"\\")
-    } else {
-        // NOTE: all paths are canonicalised, so we expect it to begin with /
-        let mut rpath = String::from(r"Z:\\\\");
-        rpath.push_str(
-            if path.starts_with("/") {
-                &path[1..]
-            } else {
-                path
-            }
-            .replace("/", r"\\")
-            .as_ref(),
-        );
-        rpath
-    }
-}
-
 /// An IDA context for interfacing with IDA Pro.
 #[derive(Debug, PartialEq)]
 pub struct IDA {
@@ -365,6 +344,7 @@ impl IDA {
             }
         }
         cmd.arg(&exec_cmd);
+        let output = cmd.output()?;
 
         if copied_target {
             fs::remove_file(orig_path.as_ref().unwrap()).ok();
@@ -384,7 +364,6 @@ impl IDA {
             fs::remove_file(&target_path).ok();
         }
 
-        let output = cmd.output()?;
         Ok(output.status.success())
     }
 }
