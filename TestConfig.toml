@@ -1,0 +1,4 @@
+# headless idat64.exe
+ida_path = "C:\\\\Program Files\\IDA 7.0\\idat64.exe"
+target_binary = "/home/chris/Documents/phd/huawei/fauxware/fauxware"
+binexport_dump = "/home/chris/Documents/phd/huawei/backend-exporter-ida/fauxware.BinExport"

@@ -20,13 +20,13 @@ pub enum IdaError {
     InvalidTarget { path: PathBuf },
     #[snafu(display("invalid analysis target {:?}; would clobber {:?}", path, clobber))]
     InvalidTargetClobber { path: PathBuf, clobber: PathBuf },
-    #[snafu(display("canonicalisation of path failed"))] 
-    BadCanonicalisation { source: std::io::Error }
+    #[snafu(display("canonicalisation of path failed"))]
+    BadCanonicalisation { source: std::io::Error },
 }
 
-impl From <std::io::Error> for IdaError {
-    fn from(error : std::io::Error) -> Self {
-        IdaError::BadCanonicalisation{ source: error }
+impl From<std::io::Error> for IdaError {
+    fn from(error: std::io::Error) -> Self {
+        IdaError::BadCanonicalisation { source: error }
     }
 }
 
@@ -58,20 +58,50 @@ lazy_static! {
     static ref WINDOWS_PATH: Regex = Regex::new("^[A-Z]:").unwrap();
 }
 
-fn windowsify<S: AsRef<str>>(path: S) -> String {
+pub fn windowsify<S: AsRef<str>>(path: S, double_escape: bool) -> String {
     let path = path.as_ref();
     if WINDOWS_PATH.is_match(path.as_ref()) {
-        path.to_owned()
+        if double_escape {
+            path.replace(r"\", r"\\")
+        } else { 
+            path.to_owned()
+        }
     } else {
         // NOTE: all paths are canonicalised, so we expect it to begin with /
-        let mut rpath = String::from(r"Z:\");
+        let mut rpath: String = if double_escape {
+            String::from(r"Z:\\\\")
+        } else {
+            String::from(r"Z:\\")
+        };
+        rpath.push_str(
+            if path.starts_with("/") {
+                &path[1..]
+            } else {
+                path
+            });
+        if double_escape {
+            path.replace("/", r"\\")
+        } else {
+            path.replace("/", r"\")
+        }
+    }
+}
+
+
+pub fn wine_windowsify<S: AsRef<str>>(path: S) -> String {
+    let path = path.as_ref();
+    if WINDOWS_PATH.is_match(path.as_ref()) {
+        path.replace(r"\", r"\\")
+    } else {
+        // NOTE: all paths are canonicalised, so we expect it to begin with /
+        let mut rpath = String::from(r"Z:\\\\");
         rpath.push_str(
             if path.starts_with("/") {
                 &path[1..]
             } else {
                 path
             }
-            .replace("/", "\\")
+            .replace("/", r"\\")
             .as_ref(),
         );
         rpath
@@ -129,11 +159,9 @@ impl IDA {
                 remove_database: true,
                 script_type: Type::Python,
             })
-            .ok_or(
-               IdaError::InvalidPath {
-                    path: ida_path.to_owned(),
-                }
-            )
+            .ok_or(IdaError::InvalidPath {
+                path: ida_path.to_owned(),
+            })
     }
 
     pub fn dockerised<R: AsRef<Path>>(
@@ -204,7 +232,12 @@ impl IDA {
 
     /// Runs the script with the contents given as `script` on the `target`
     /// executable.
-    pub fn run<T: AsRef<Path>>(&self, script: &str, target: T) -> Result<bool, IdaError> {
+    pub fn run<T: AsRef<Path>>(
+        &self,
+        script: &str,
+        script_args: Option<&str>,
+        target: T,
+    ) -> Result<bool, IdaError> {
         let target = target.as_ref().canonicalize()?;
         let mut copied_target = false;
         let mut orig_path = None;
@@ -265,7 +298,8 @@ impl IDA {
                     return Err(IdaError::InvalidTargetClobber {
                         path: target.to_owned(),
                         clobber: to,
-                    }.into())
+                    }
+                    .into());
                 }
                 let rtarget = PathBuf::from_iter(&[mount_dir.as_ref(), file]);
                 fs::copy(target, &to)?;
@@ -290,27 +324,47 @@ impl IDA {
             )
         };
 
+        let mut exec_cmd = String::new();
+
         if self.wine {
             if self.is_headless() {
-                cmd.args(&["wineconsole", "--backend=curses"]);
+                exec_cmd.push_str("wineconsole --backend=curses");
             } else {
-                cmd.arg("wine");
+                exec_cmd.push_str("wine");
             };
-
+            exec_cmd.push(' ');
+            exec_cmd.push_str(&windowsify(&self.exec, true));
             let target_str = rtarget.to_string_lossy();
-            cmd.args(&[
-                &self.exec,
-                "-A",
-                &format!("-S{}", windowsify(rscript)),
-                &windowsify(target_str),
-            ]);
+            if script_args.is_some() {
+                exec_cmd.push_str(
+                    &format!(" -A -S\"{} {}\" {}",
+                                &windowsify(script, false),
+                                script_args.unwrap(), // we windowsify this (if required) in the actual script
+                                &windowsify(target_str, true)
+                            )
+                );
+            } else {
+                exec_cmd.push_str(
+                    &format!(" -A -S{} {}",
+                                &windowsify(script, true),
+                                &windowsify(target_str, true)
+                            )
+                );
+            }
         } else {
-            cmd.arg(&self.exec);
+            cmd.arg(&windowsify(&self.exec, true));
             let target_str = rtarget.to_string_lossy();
-            cmd.args(&["-A", &format!("-S{}", rscript), target_str.as_ref()]);
+            if script_args.is_some() {
+                cmd.args(&[
+                    "-A",
+                    &format!("-S\"{} {}\"", rscript, script_args.unwrap()),
+                    target_str.as_ref(),
+                ]);
+            } else {
+                cmd.args(&["-A", &format!("-S{}", rscript), target_str.as_ref()]);
+            }
         }
-
-        let output = cmd.output()?;
+        cmd.arg(&exec_cmd);
 
         if copied_target {
             fs::remove_file(orig_path.as_ref().unwrap()).ok();
@@ -330,6 +384,7 @@ impl IDA {
             fs::remove_file(&target_path).ok();
         }
 
+        let output = cmd.output()?;
         Ok(output.status.success())
     }
 }
