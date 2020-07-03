@@ -316,7 +316,7 @@ impl IDA {
             let target_str = rtarget.to_string_lossy();
             if script_args.is_some() {
                 exec_cmd.push_str(
-                    &format!(" -A -S\"{} {}\" {}",
+                    &format!(" -B -A -S\"{} {}\" {}",
                                 &windowsify(script, false),
                                 script_args.unwrap(), // we windowsify this (if required) in the actual script
                                 &windowsify(target_str, true)
@@ -324,7 +324,7 @@ impl IDA {
                 );
             } else {
                 exec_cmd.push_str(
-                    &format!(" -A -S{} {}",
+                    &format!(" -B -A -S{} {}",
                                 &windowsify(script, true),
                                 &windowsify(target_str, true)
                             )
@@ -344,6 +344,7 @@ impl IDA {
             }
         }
         cmd.arg(&exec_cmd);
+        //println!("Executing command: {:?}", cmd);
         let output = cmd.output()?;
 
         if copied_target {
