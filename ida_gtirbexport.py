@@ -107,7 +107,7 @@ def make_blocks(isa, section, iv, blocks):
             outer.offset = fn_entry_address - base
             id = blocks.get(start_addr, None)
             if id is None:
-                id = uuid4().get_bytes()
+                id = uuid4().bytes
                 blocks[start_addr] = id
             inner = CodeBlock.CodeBlock()
             inner.uuid = id
@@ -125,7 +125,7 @@ def make_blocks(isa, section, iv, blocks):
                 size = idc.get_item_size(ea)
                 outer = ByteInterval.Block()
                 outer.offset = ea - base
-                id = uuid4().get_bytes()
+                id = uuid4().bytes
                 inner = DataBlock.DataBlock()
                 inner.uuid = id
                 inner.size = size
@@ -136,12 +136,12 @@ def make_blocks(isa, section, iv, blocks):
 def make_byte_intervals(isa, section, blocks):
     # just one
     bint = ByteInterval.ByteInterval()
-    bint.uuid = uuid4().get_bytes()
+    bint.uuid = uuid4().bytes
     bint.has_address = True
     bint.address = idc.SegStart(section)
     bint.size = idc.SegEnd(section) - bint.address
     make_blocks(isa, section, bint, blocks)
-    contents = idaapi.get_bytes(bint.address, bint.size)
+    bint.contents = idaapi.get_bytes(bint.address, bint.size)
     return [bint]
 
 
@@ -150,7 +150,7 @@ def make_sections(isa, blocks):
     for ea in idautils.Segments():
         seg = idaapi.getseg(ea)
         section = Section.Section()
-        section.uuid = uuid4().get_bytes()
+        section.uuid = uuid4().bytes
         section.name = idaapi.get_segm_name(seg)
         section_flags = []
         if seg.perm & idaapi.SEGPERM_READ: section_flags.append(Section.SectionFlag.Readable)
@@ -200,7 +200,7 @@ def make_symbols(module, blocks):
             name = func_name_propagate_thunk(f)
             addr = idc.GetFunctionAttr(f, idc.FUNCATTR_START)
             sym = Symbol.Symbol()
-            sym.uuid = uuid4().get_bytes()
+            sym.uuid = uuid4().bytes
             sym.name = name
             sym.referent_uuid = blocks[addr] 
             module.symbols.append(sym)
@@ -234,7 +234,7 @@ def make_cfg(blocks, proxy_blocks):
                 addr = fn_block.startEA
                 uuid = blocks.get(addr, None)
                 if uuid is None:
-                    uuid = uuid4().get_bytes()
+                    uuid = uuid4().bytes
                     blocks[addr] = uuid
                     cfg.vertices.append(uuid)
                 
@@ -248,7 +248,7 @@ def make_cfg(blocks, proxy_blocks):
                     destAddr = dest.startEA
                     destUuid = blocks.get(destAddr, None)
                     if destUuid is None:
-                        destUuid = uuid4().get_bytes()
+                        destUuid = uuid4().bytes
                         blocks[destAddr] = destUuid
                         cfg.vertices.append(destUuid)
                         # if external:
@@ -264,7 +264,7 @@ def make_cfg(blocks, proxy_blocks):
 def make_module(blocks, proxy_blocks):
     module = Module.Module()
     info = get_meta()
-    module.uuid = uuid4().get_bytes()
+    module.uuid = uuid4().bytes
     module.binary_path = info["exec_path"]
     module.preferred_addr = info["image_base"]
     module.rebase_delta = 0
@@ -282,7 +282,7 @@ def make_module(blocks, proxy_blocks):
 
 def make_ir():
     ir = IR.IR()
-    ir.uuid = uuid4().get_bytes()
+    ir.uuid = uuid4().bytes
     blocks = dict()
     proxy_blocks = []
     ir.cfg.MergeFrom(make_cfg(blocks, proxy_blocks))
