@@ -59,7 +59,7 @@ def get_meta():
 def make_isa(meta):
     processor = meta["arch"]
     bits = int(meta["bits"])
-    if processor == "x86":
+    if processor == "x86" or processor == "metapc":
         if bits == 64:
             return Module.ISA.X64
         elif bits == 32:
@@ -225,8 +225,9 @@ def make_edgelabel(dest, is_conditional):
     return label
 
 
-def make_cfg(blocks, proxy_blocks):
+def make_cfg(blocks, proxy_blocks, info):
     cfg = CFG.CFG()
+    entry_point_uuid = None
     for ea in idautils.Segments():
         for fn_entry_address in idautils.Functions(idc.SegStart(ea), idc.SegEnd(ea)):
             fn = idaapi.get_func(fn_entry_address)
@@ -237,7 +238,8 @@ def make_cfg(blocks, proxy_blocks):
                     uuid = uuid4().bytes
                     blocks[addr] = uuid
                     cfg.vertices.append(uuid)
-                
+                if addr == info["entry_point"]:
+                    entry_point_uuid = uuid
                 is_conditional = fn_block.succs() > 1
                 for dest in fn_block.succs():
                     kind = make_edgelabel(dest, is_conditional)
@@ -259,11 +261,11 @@ def make_cfg(blocks, proxy_blocks):
                     edge.label.MergeFrom(kind)
                     cfg.edges.append(edge)
                 
-    return cfg
+    return (cfg, entry_point_uuid)
 
-def make_module(blocks, proxy_blocks):
+def make_module(blocks, proxy_blocks, info):
     module = Module.Module()
-    info = get_meta()
+    module.aux_data.clear()
     module.uuid = uuid4().bytes
     module.binary_path = info["exec_path"]
     module.preferred_addr = info["image_base"]
@@ -272,11 +274,10 @@ def make_module(blocks, proxy_blocks):
     isa = make_isa(info)
     module.isa = isa
     module.name = info["prog_name"]
-    module.proxies.extend(proxy_blocks)
+    #module.proxies.extend(proxy_blocks)
     module.sections.extend(make_sections(isa, blocks))
     make_symbols(module, blocks)
     #module.aux_data.append()
-    module.entry_point = bytes(info["entry_point"])
     return module
 
 
@@ -285,8 +286,12 @@ def make_ir():
     ir.uuid = uuid4().bytes
     blocks = dict()
     proxy_blocks = []
-    ir.cfg.MergeFrom(make_cfg(blocks, proxy_blocks))
-    ir.modules.append(make_module(blocks, proxy_blocks))
+    info = get_meta()
+    (cfg, entry_point_uuid) = make_cfg(blocks, proxy_blocks, info)
+    ir.cfg.MergeFrom(cfg)
+    module = make_module(blocks, proxy_blocks, info)
+    module.entry_point = entry_point_uuid
+    ir.modules.append(module)
     # ir.aux_data.append()
     ir.version = GTIRB_VERSION
     return ir
