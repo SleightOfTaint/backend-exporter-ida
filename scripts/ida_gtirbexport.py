@@ -9,6 +9,7 @@ import CodeBlock_pb2 as CodeBlock
 import Symbol_pb2 as Symbol
 import DataBlock_pb2 as DataBlock
 import ByteInterval_pb2 as ByteInterval
+import ProxyBlock_pb2 as ProxyBlock
 import CFG_pb2 as CFG
 import Section_pb2 as Section
 from uuid import uuid4
@@ -205,15 +206,21 @@ def make_symbols(module, blocks):
             sym.referent_uuid = blocks[addr] 
             module.symbols.append(sym)
 
-# TODO Extracting CFG edge properties via adaptaptation of mcsema's IDA exporter
+# TODO Investigate whether detailed CFG edge properties are required.
+# Could be obtained via adaptaptation of mcsema's IDA exporter, or BinExport
 # https://github.com/lifting-bits/mcsema/blob/master/tools/mcsema_disass/ida7/flow.py
 # Only supports x86, AMD64, AAarch64, so will require additional support for ARM32, and MIPS
 
-def make_edgelabel(dest, is_conditional):
+def make_edgelabel(from_fn, dest, is_conditional):
     label = CFG.EdgeLabel()
-    
+    external = False
     label.conditional = is_conditional
-    # builder.setDirect(not kind.isIndirect() and not kind.isComputed())
+    dest_fn = idaapi.get_func(dest.startEA)
+    if dest_fn and dest_fn != from_fn:
+        if dest_fn.flags & (idaapi.FUNC_LIB | idaapi.FUNC_THUNK):
+            external = True
+            
+    # TODO check whether indirect jump or any of the below
     # if kind.isJump():
     #     builder.setType(EdgeType.Type_Branch)
     # elif kind.isCall():
@@ -222,7 +229,7 @@ def make_edgelabel(dest, is_conditional):
     #     builder.setType(EdgeType.Type_Fallthrough)
     # else:
     #     return None
-    return label
+    return (label, external)
 
 
 def make_cfg(blocks, proxy_blocks, info):
@@ -242,23 +249,24 @@ def make_cfg(blocks, proxy_blocks, info):
                     entry_point_uuid = uuid
                 is_conditional = fn_block.succs() > 1
                 for dest in fn_block.succs():
-                    kind = make_edgelabel(dest, is_conditional)
-                    if kind is None:
+                    label, external = make_edgelabel(fn, dest, is_conditional)
+                    if label is None:
                         continue
-                    # TODO check if external control flow
-                    # label, external = kind
                     destAddr = dest.startEA
                     destUuid = blocks.get(destAddr, None)
                     if destUuid is None:
                         destUuid = uuid4().bytes
                         blocks[destAddr] = destUuid
                         cfg.vertices.append(destUuid)
-                        # if external:
-                        #     proxy_blocks.append(destUuid)
+                        if external:
+                            proxy_block = ProxyBlock.ProxyBlock()
+                            proxy_block.uuid = destUuid
+                            if proxy_block not in proxy_blocks:
+                                proxy_blocks.append(proxy_block)
                     edge = CFG.Edge()
                     edge.source_uuid = uuid
                     edge.target_uuid = destUuid
-                    edge.label.MergeFrom(kind)
+                    edge.label.MergeFrom(label)
                     cfg.edges.append(edge)
                 
     return (cfg, entry_point_uuid)
@@ -274,7 +282,7 @@ def make_module(blocks, proxy_blocks, info):
     isa = make_isa(info)
     module.isa = isa
     module.name = info["prog_name"]
-    #module.proxies.extend(proxy_blocks)
+    module.proxies.extend(proxy_blocks)
     module.sections.extend(make_sections(isa, blocks))
     make_symbols(module, blocks)
     #module.aux_data.append()
@@ -296,7 +304,10 @@ def make_ir():
     ir.version = GTIRB_VERSION
     return ir
 
+idc.auto_wait()
 filename = windowsify(idc.ARGV[1])
+#filename = windowsify("/home/chris/Documents/phd/huawei/backend-exporter-ida/tests/fauxware.gtirb")
 with open(filename, "wb") as f:
     f.write(make_ir().SerializeToString())
+    print("Export successful!")
 idc.qexit(0)
