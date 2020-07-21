@@ -145,10 +145,21 @@ def make_byte_intervals(isa, section, blocks):
     bint.contents = idaapi.get_bytes(bint.address, bint.size)
     return [bint]
 
+def is_invalid_ea(ea):
+  # Returns `True` if `ea` is not valid, i.e. it doesn't point into any valid segment.
+  if (idc.BADADDR == ea) or (idc.get_segm_name(ea) == "LOAD"):
+    return True
+  try:
+    idc.get_segm_attr(idc.get_segm_start(ea), idc.SEGATTR_TYPE)
+    return False  # If we get here, then it must be a valid ea
+  except:
+    return True 
+
 
 def make_sections(isa, blocks):
     sections = []
     for ea in idautils.Segments():
+        if is_invalid_ea(ea): continue
         seg = idaapi.getseg(ea)
         section = Section.Section()
         section.uuid = uuid4().bytes
@@ -196,6 +207,7 @@ def make_symbols(module, blocks):
             #     a 0 length name, or finds a longer import name
 
     for ea in idautils.Segments():
+        if is_invalid_ea(ea): continue
         fs = idautils.Functions(idc.SegStart(ea), idc.SegEnd(ea))
         for f in fs:
             name = func_name_propagate_thunk(f)
@@ -236,6 +248,7 @@ def make_cfg(blocks, proxy_blocks, info):
     cfg = CFG.CFG()
     entry_point_uuid = None
     for ea in idautils.Segments():
+        if is_invalid_ea(ea): continue
         for fn_entry_address in idautils.Functions(idc.SegStart(ea), idc.SegEnd(ea)):
             fn = idaapi.get_func(fn_entry_address)
             for fn_block in idaapi.FlowChart(fn):
