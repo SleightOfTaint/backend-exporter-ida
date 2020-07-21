@@ -8,11 +8,50 @@ import Module_pb2 as Module
 import CodeBlock_pb2 as CodeBlock
 import Symbol_pb2 as Symbol
 import DataBlock_pb2 as DataBlock
+import AuxData_pb2 as AuxData
 import ByteInterval_pb2 as ByteInterval
 import ProxyBlock_pb2 as ProxyBlock
 import CFG_pb2 as CFG
 import Section_pb2 as Section
 from uuid import uuid4
+import io
+
+class Serialiser:
+    b = None
+    size = 0
+    def __init__(self):
+        self.b = io.BytesIO()
+        self.size = 0
+        
+    def write_long(self, val):
+        import struct;
+        self.b.write(struct.pack(">l", val))
+        self.size += 4
+
+    def write_uuid_dict(self, uuid_dict):
+        self.write_long(len(uuid_dict))
+        for k in uuid_dict.keys():
+            self.write_uuid(k)
+            self.write_uuid(uuid_dict[k])
+            
+    def write_uuid_map_set(self, uuid_map_set):
+        self.write_long(len(uuid_map_set))
+        for k in uuid_map_set.keys():
+            self.write_uuid(k)
+            self.write_uuid_set(uuid_map_set[k])
+            
+    def write_uuid_set(self, uuid_set):
+        self.write_long(len(uuid_set))
+        for k in uuid_set:
+            self.write_uuid(k)
+
+    def write_uuid(self, uuid):
+        self.b.write(uuid)
+        self.size += 16
+
+    def to_bytes(self):
+        return self.b.read(self.size)
+    
 
 def windowsify(path):
     if path.startswith('/'):
@@ -92,7 +131,7 @@ def make_isa(meta):
         return Module.ISA.ValidButUnsupported
 
 
-def make_blocks(isa, section, iv, blocks):
+def make_blocks(isa, section, iv, blocks, function_names, function_blocks, function_entries):
     base = idc.SegStart(section)
     end = idc.SegEnd(section)
     seg = idaapi.getseg(section)
@@ -100,16 +139,30 @@ def make_blocks(isa, section, iv, blocks):
     # Code blocks
     for fn_entry_address in idautils.Functions(base, end):
         fn = idaapi.get_func(fn_entry_address)
+        name = func_name_propagate_thunk(fn_entry_address)
         for fn_block in idaapi.FlowChart(fn):
             block = dict()
             start_addr = fn_block.startEA
             end_addr = fn_block.endEA
             outer = ByteInterval.Block()
-            outer.offset = fn_entry_address - base
+            outer.offset = start_addr - base
             id = blocks.get(start_addr, None)
             if id is None:
                 id = uuid4().bytes
                 blocks[start_addr] = id
+                
+            if name not in function_names and start_addr == fn_entry_address:
+                function_names[name] = id
+                
+            if name not in function_blocks:
+                function_blocks[name] = {id}
+            else:
+                function_blocks[name].add(id)
+            
+            if id not in function_entries and start_addr == fn_entry_address:
+                # Why is this a set if there can't be multiple entries to a function?
+                function_entries[id] = {function_names[name]}
+                
             inner = CodeBlock.CodeBlock()
             inner.uuid = id
             inner.size = end_addr - start_addr
@@ -132,16 +185,16 @@ def make_blocks(isa, section, iv, blocks):
                 inner.size = size
                 outer.data.MergeFrom(inner)
                 iv.blocks.append(outer)
+    
 
-
-def make_byte_intervals(isa, section, blocks):
+def make_byte_intervals(isa, section, blocks, function_names, function_blocks, function_entries):
     # just one
     bint = ByteInterval.ByteInterval()
     bint.uuid = uuid4().bytes
     bint.has_address = True
     bint.address = idc.SegStart(section)
     bint.size = idc.SegEnd(section) - bint.address
-    make_blocks(isa, section, bint, blocks)
+    make_blocks(isa, section, bint, blocks, function_names, function_blocks, function_entries)
     bint.contents = idaapi.get_bytes(bint.address, bint.size)
     return [bint]
 
@@ -156,7 +209,7 @@ def is_invalid_ea(ea):
     return True 
 
 
-def make_sections(isa, blocks):
+def make_sections(isa, blocks, function_names, function_blocks, function_entries):
     sections = []
     for ea in idautils.Segments():
         if is_invalid_ea(ea): continue
@@ -172,40 +225,36 @@ def make_sections(isa, blocks):
         # if section.isLoaded(): section_flags.append(SectionFlag.Loaded)
         # if section.isInitialized(): section_flags.append(SectionFlag.Initialized)
         section.section_flags.extend(section_flags)
-        section.byte_intervals.extend(make_byte_intervals(isa, ea, blocks))
+        section.byte_intervals.extend(make_byte_intervals(isa, ea, blocks, function_names, function_blocks, function_entries))
         sections.append(section)
     return sections
 
+# Adapted from BAPs IDA plugin
+from idaapi import get_func_name2 as get_func_name
 
-def make_symbols(module, blocks):
-    # Adapted from BAPs IDA plugin
-    try:
-        from idaapi import get_func_name2 as get_func_name
-        # Since get_func_name is deprecated (at least from IDA 6.9)
-    except ImportError:
-        from idaapi import get_func_name
-        # Older versions of IDA don't have get_func_name2
-        # so we just use the older name get_func_name
+def func_name_propagate_thunk(ea):
+    current_name = get_func_name(ea)
+    if current_name[0].isalpha():
+        return current_name
+    func = idaapi.get_func(ea)
+    temp_ptr = idaapi.ea_pointer()
+    ea_new = idaapi.BADADDR
+    if func.flags & idaapi.FUNC_THUNK == idaapi.FUNC_THUNK:
+        ea_new = idaapi.calc_thunk_func_target(func, temp_ptr.cast())
+    if ea_new != idaapi.BADADDR:
+        ea = ea_new
+    propagated_name = get_func_name(ea) or ''  # Ensure it is not `None`
+    if len(current_name) > len(propagated_name) > 0:
+        return propagated_name
+    else:
+        return current_name
+        # Fallback to non-propagated name for weird times that IDA gives
+        #     a 0 length name, or finds a longer import name
 
-    def func_name_propagate_thunk(ea):
-        current_name = get_func_name(ea)
-        if current_name[0].isalpha():
-            return current_name
-        func = idaapi.get_func(ea)
-        temp_ptr = idaapi.ea_pointer()
-        ea_new = idaapi.BADADDR
-        if func.flags & idaapi.FUNC_THUNK == idaapi.FUNC_THUNK:
-            ea_new = idaapi.calc_thunk_func_target(func, temp_ptr.cast())
-        if ea_new != idaapi.BADADDR:
-            ea = ea_new
-        propagated_name = get_func_name(ea) or ''  # Ensure it is not `None`
-        if len(current_name) > len(propagated_name) > 0:
-            return propagated_name
-        else:
-            return current_name
-            # Fallback to non-propagated name for weird times that IDA gives
-            #     a 0 length name, or finds a longer import name
-
+# TODO this is probably redudant with the current make_blocks function
+# which executes the same function iteration
+def make_symbols(module, blocks, function_names):
+    function_uuid_mapping = dict()
     for ea in idautils.Segments():
         if is_invalid_ea(ea): continue
         fs = idautils.Functions(idc.SegStart(ea), idc.SegEnd(ea))
@@ -217,6 +266,21 @@ def make_symbols(module, blocks):
             sym.name = name
             sym.referent_uuid = blocks[addr] 
             module.symbols.append(sym)
+            if name not in function_names:
+                function_names[name] = uuid4().bytes
+            
+            f_uuid = function_names[name]
+            if f_uuid not in function_uuid_mapping:
+                function_uuid_mapping[f_uuid] = sym.uuid
+            
+    sz = Serialiser()
+    sz.write_uuid_dict(function_uuid_mapping)
+    aux = AuxData.AuxData()
+    aux.type_name = "mapping<UUID,UUID>"
+    aux.data = sz.to_bytes()
+    # nasty copyfrom is not documented anywhere....
+    module.aux_data["functionNames"].CopyFrom(aux)
+    
 
 # TODO Investigate whether detailed CFG edge properties are required.
 # Could be obtained via adaptaptation of mcsema's IDA exporter, or BinExport
@@ -231,6 +295,8 @@ def make_edgelabel(from_fn, dest, is_conditional):
     if dest_fn and dest_fn != from_fn:
         if dest_fn.flags & (idaapi.FUNC_LIB | idaapi.FUNC_THUNK):
             external = True
+        else:
+            label.type = CFG.Type_Call
             
     # TODO check whether indirect jump or any of the below
     # if kind.isJump():
@@ -285,6 +351,11 @@ def make_cfg(blocks, proxy_blocks, info):
     return (cfg, entry_point_uuid)
 
 def make_module(blocks, proxy_blocks, info):
+    
+    function_names = dict()
+    function_blocks = dict()
+    function_entries = dict()
+    
     module = Module.Module()
     module.aux_data.clear()
     module.uuid = uuid4().bytes
@@ -296,9 +367,23 @@ def make_module(blocks, proxy_blocks, info):
     module.isa = isa
     module.name = info["prog_name"]
     module.proxies.extend(proxy_blocks)
-    module.sections.extend(make_sections(isa, blocks))
-    make_symbols(module, blocks)
-    #module.aux_data.append()
+    module.sections.extend(make_sections(isa, blocks, function_names, function_blocks, function_entries))
+    make_symbols(module, blocks, function_names)
+    
+    sz = Serialiser()
+    sz.write_uuid_map_set(function_blocks)
+    aux = AuxData.AuxData()
+    aux.type_name = "mapping<UUID,set<UUID>>"
+    aux.data = sz.to_bytes()
+    module.aux_data["functionBlocks"].CopyFrom(aux)
+    
+    sz = Serialiser()
+    sz.write_uuid_map_set(function_entries)
+    aux = AuxData.AuxData()
+    aux.type_name = "mapping<UUID,set<UUID>>"
+    aux.data = sz.to_bytes()
+    module.aux_data["functionEntries"].CopyFrom(aux)
+    
     return module
 
 
@@ -311,6 +396,7 @@ def make_ir():
     (cfg, entry_point_uuid) = make_cfg(blocks, proxy_blocks, info)
     ir.cfg.MergeFrom(cfg)
     module = make_module(blocks, proxy_blocks, info)
+    # Shouldn't modules support multiple entry points?
     module.entry_point = entry_point_uuid
     ir.modules.append(module)
     # ir.aux_data.append()
