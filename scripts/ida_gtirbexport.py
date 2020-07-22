@@ -68,6 +68,7 @@ def make_decode_mode(isa, addr):
     #     value = currentProgram.programContext.getRegisterValue(tmode, addr)
     #     return value.unsignedValueIgnoreMask
     # else:
+        #block['t_reg'] = GetReg(fn_block.startEA, 'T') == 1
         return 0
 
 
@@ -144,8 +145,11 @@ def make_blocks(isa, section, iv, blocks, function_names, function_blocks, funct
             start_addr = fn_block.startEA
             end_addr = fn_block.endEA
             outer = ByteInterval.Block()
-            # replacing `fn_entry_address` below with `start_addr` causes deserialisation error in niobe DB
-            outer.offset = fn_entry_address - base
+            # Negative offsets represent thunks, so we won't include them in our blocks
+            # May need to come back to this at a later point
+            if (start_addr - base) < 0:
+                continue
+            outer.offset = start_addr - base
             id = blocks.get(start_addr, None)
             if id is None:
                 id = uuid4().bytes
