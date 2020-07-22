@@ -14,18 +14,18 @@ import ProxyBlock_pb2 as ProxyBlock
 import CFG_pb2 as CFG
 import Section_pb2 as Section
 from uuid import uuid4
-import io
+import StringIO
 
 class Serialiser:
     b = None
     size = 0
     def __init__(self):
-        self.b = io.BytesIO()
+        self.b = StringIO.StringIO()
         self.size = 0
         
     def write_long(self, val):
         import struct;
-        self.b.write(struct.pack(">l", val))
+        self.b.write(struct.pack("<q", val))
         self.size += 4
 
     def write_uuid_dict(self, uuid_dict):
@@ -50,7 +50,7 @@ class Serialiser:
         self.size += 16
 
     def to_bytes(self):
-        return self.b.read(self.size)
+        return self.b.getvalue()
     
 
 def windowsify(path):
@@ -141,11 +141,11 @@ def make_blocks(isa, section, iv, blocks, function_names, function_blocks, funct
         fn = idaapi.get_func(fn_entry_address)
         name = func_name_propagate_thunk(fn_entry_address)
         for fn_block in idaapi.FlowChart(fn):
-            block = dict()
             start_addr = fn_block.startEA
             end_addr = fn_block.endEA
             outer = ByteInterval.Block()
-            outer.offset = start_addr - base
+            # replacing `fn_entry_address` below with `start_addr` causes deserialisation error in niobe DB
+            outer.offset = fn_entry_address - base
             id = blocks.get(start_addr, None)
             if id is None:
                 id = uuid4().bytes
@@ -153,11 +153,12 @@ def make_blocks(isa, section, iv, blocks, function_names, function_blocks, funct
                 
             if name not in function_names and start_addr == fn_entry_address:
                 function_names[name] = id
-                
+            
+            fn_uuid = function_names[name]    
             if name not in function_blocks:
-                function_blocks[name] = {id}
+                function_blocks[fn_uuid] = {id}
             else:
-                function_blocks[name].add(id)
+                function_blocks[fn_uuid].add(id)
             
             if id not in function_entries and start_addr == fn_entry_address:
                 # Why is this a set if there can't be multiple entries to a function?
@@ -405,7 +406,6 @@ def make_ir():
 
 idc.auto_wait()
 filename = windowsify(idc.ARGV[1])
-#filename = windowsify("/home/chris/Documents/phd/huawei/backend-exporter-ida/tests/fauxware.gtirb")
 with open(filename, "wb") as f:
     f.write(make_ir().SerializeToString())
     print("Export successful!")
