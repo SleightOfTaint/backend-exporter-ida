@@ -159,7 +159,7 @@ def make_blocks(isa, section, iv, blocks, function_names, function_blocks, funct
                 function_names[name] = id
             
             fn_uuid = function_names[name]    
-            if name not in function_blocks:
+            if fn_uuid not in function_blocks:
                 function_blocks[fn_uuid] = {id}
             else:
                 function_blocks[fn_uuid].add(id)
@@ -271,8 +271,6 @@ def make_symbols(module, blocks, function_names):
             sym.name = name
             sym.referent_uuid = blocks[addr] 
             module.symbols.append(sym)
-            if name not in function_names:
-                function_names[name] = uuid4().bytes
             
             f_uuid = function_names[name]
             if f_uuid not in function_uuid_mapping:
